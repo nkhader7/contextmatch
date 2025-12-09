@@ -161,68 +161,23 @@ def compute_cosine_similarity(vec_a: List[float], vec_b: List[float]) -> float:
     return float(np.dot(a, b) / denominator)
 
 
-def fetch_embeddings(
-    values: List[str], base_url: str, api_key: str, model: str, label: str
-) -> Tuple[List[Optional[List[float]]], List[str]]:
-    embeddings: List[Optional[List[float]]] = []
-    errors: List[str] = []
-    for idx, value in enumerate(values, start=1):
-        if not value:
-            errors.append(f"{label} row {idx}: missing text to embed")
-            embeddings.append(None)
-            continue
-        embedding = request_embedding(base_url, api_key, model, str(value))
-        if not embedding:
-            errors.append(f"{label} row {idx}: failed to fetch embedding")
-        embeddings.append(embedding)
-    return embeddings, errors
-
-
-def build_best_match_dataframe(
-    policies: List[str], controls: List[str], base_url: str, api_key: str, model: str
+def build_similarity_dataframe(
+    values_a: List[str], values_b: List[str], base_url: str, api_key: str, model: str
 ) -> Tuple[pd.DataFrame, List[str]]:
-    policy_embeddings, errors = fetch_embeddings(policies, base_url, api_key, model, "Policy")
-    control_embeddings, control_errors = fetch_embeddings(
-        controls, base_url, api_key, model, "Control"
-    )
-    errors.extend(control_errors)
-
-    valid_policy_indices = [i for i, emb in enumerate(policy_embeddings) if emb]
-    valid_control_indices = [i for i, emb in enumerate(control_embeddings) if emb]
-
-    if not valid_policy_indices or not valid_control_indices:
-        if not valid_policy_indices:
-            errors.append("No valid policy embeddings were generated.")
-        if not valid_control_indices:
-            errors.append("No valid control embeddings were generated.")
-        return pd.DataFrame(), errors
-
-    policy_matrix = np.array([policy_embeddings[i] for i in valid_policy_indices])
-    control_matrix = np.array([control_embeddings[i] for i in valid_control_indices])
-
-    policy_norms = np.linalg.norm(policy_matrix, axis=1, keepdims=True)
-    control_norms = np.linalg.norm(control_matrix, axis=1, keepdims=True)
-    denominator = policy_norms * control_norms.T
-    similarity_matrix = np.divide(
-        policy_matrix @ control_matrix.T,
-        denominator,
-        out=np.zeros_like(policy_matrix @ control_matrix.T),
-        where=denominator != 0,
-    )
-
+    errors: List[str] = []
+    pairs = zip(values_a, values_b)
     rows = []
-    for row_idx, policy_idx in enumerate(valid_policy_indices):
-        best_control_idx = int(np.argmax(similarity_matrix[row_idx]))
-        control_idx = valid_control_indices[best_control_idx]
-        score = float(similarity_matrix[row_idx, best_control_idx])
-        rows.append(
-            {
-                "Policy Statement": policies[policy_idx],
-                "Best Matching Control": controls[control_idx],
-                "Similarity": score,
-            }
-        )
-
+    for idx, (val_a, val_b) in enumerate(pairs, start=1):
+        if not val_a or not val_b:
+            errors.append(f"Row {idx}: missing text to embed")
+            continue
+        emb_a = request_embedding(base_url, api_key, model, str(val_a))
+        emb_b = request_embedding(base_url, api_key, model, str(val_b))
+        if not emb_a or not emb_b:
+            errors.append(f"Row {idx}: failed to fetch embeddings")
+            continue
+        score = compute_cosine_similarity(emb_a, emb_b)
+        rows.append({"File 1": val_a, "File 2": val_b, "Similarity": score})
     return pd.DataFrame(rows), errors
 
 
@@ -320,31 +275,15 @@ if selection_a and selection_b and chosen_model:
     col_values_a = df1[selection_a.column].dropna().astype(str).tolist()
     col_values_b = df2[selection_b.column].dropna().astype(str).tolist()
 
-    direction = st.radio(
-        "Choose comparison direction",
-        (
-            "File 1 as policy statements ➜ best control in File 2",
-            "File 2 as policy statements ➜ best control in File 1",
-        ),
-    )
-
-    if not col_values_a or not col_values_b:
+    limit = min(len(col_values_a), len(col_values_b))
+    if limit == 0:
         st.warning("Selected columns are empty.")
     else:
-        if direction.startswith("File 1"):
-            policies, controls = col_values_a, col_values_b
-            policy_label, control_label = selection_a.column, selection_b.column
-        else:
-            policies, controls = col_values_b, col_values_a
-            policy_label, control_label = selection_b.column, selection_a.column
-
-        st.write(
-            f"Finding the best matching {control_label!r} control for each {policy_label!r} policy statement."
-        )
+        st.write(f"Comparing the first {limit} rows from each column.")
         if st.button("Generate similarity scores", type="primary"):
             with st.spinner("Contacting the LLM and computing similarities..."):
-                results_df, errors = build_best_match_dataframe(
-                    policies, controls, base_url, api_key, chosen_model
+                results_df, errors = build_similarity_dataframe(
+                    col_values_a[:limit], col_values_b[:limit], base_url, api_key, chosen_model
                 )
             if not results_df.empty:
                 st.dataframe(results_df)
